@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.lock
+webDriver/
+**.DS_Store
+config.json
+*.bak
+.chrome-profile-*/
+.chrome-profile/
+.selenium-cache/

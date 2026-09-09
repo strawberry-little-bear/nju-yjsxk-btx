@@ -4,6 +4,42 @@
       "name": "085212D28-高级编程语言设计与实现（高级编程语言设计与实现01）",
       "keywords": ["高级编程语言"],
       "enabled": true
+    },
+    {
+      "name": "软件安全",
+      "keywords": ["软件安全"],
+      "enabled": true
+    },
+    {
+      "name": "数理逻辑",
+      "keywords": ["数理逻辑"],
+      "enabled": true
+    },
+    {
+      "name": "软件工程与计算",
+      "keywords": ["软件工程与计算"],
+      "enabled": true
+    },
+    {
+      "name": "软件测试",
+      "keywords": ["软件测试"],
+      "enabled": true
+    },
+    {
+      "name": "软件产品规划",
+      "keywords": ["软件产品规划"],
+      "enabled": true
+    },
+    {
+      "name": "085212D21-统计模型：理论与实践（统计模型：理论与实践01）",
+      "keywords": ["统计模型"],
+      "enabled": true
+    },
+    {
+      "name": "085212D02-分布式计算系统（分布式计算系统01）",
+      "keywords": ["分布式计算系统"],
+      "enabled": true
     }
+
   ]
 }

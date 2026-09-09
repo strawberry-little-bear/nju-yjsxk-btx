@@ -9,3 +9,4 @@ config.json
 .chrome-profile/
 .selenium-cache/
 log/
+state.json

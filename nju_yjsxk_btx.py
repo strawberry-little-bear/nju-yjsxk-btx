@@ -18,6 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 UNAVAILABLE_MARKERS = ("已满", "满额", "无余量", "不可选")
 _LOG_FILE = None
+STATE_PATH = Path("state.json")
 
 
 def start_logging():
@@ -42,6 +43,58 @@ def close_logging():
     if _LOG_FILE:
         _LOG_FILE.close()
         _LOG_FILE = None
+
+
+def load_state(keywords):
+    fresh_state = {
+        "successful_courses": [],
+        "pending_keywords": list(dict.fromkeys(keywords)),
+        "last_failure_reason": "",
+        "refresh_count": 0,
+        "last_run_at": "",
+    }
+    if not STATE_PATH.exists():
+        return fresh_state
+    try:
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log("[状态] state.json 无法读取，使用全新任务状态。")
+        return fresh_state
+    configured = list(dict.fromkeys(keywords))
+    saved_pending = [item for item in state.get("pending_keywords", []) if item in configured]
+    saved_successful = state.get("successful_courses", [])
+    pending = (
+        saved_pending
+        if "pending_keywords" in state
+        else configured
+    )
+    state.update(
+        successful_courses=saved_successful,
+        pending_keywords=pending,
+        last_failure_reason=state.get("last_failure_reason", ""),
+        refresh_count=int(state.get("refresh_count", 0)),
+        last_run_at=state.get("last_run_at", ""),
+    )
+    return state
+
+
+def save_state(state):
+    state["last_run_at"] = datetime.now().isoformat(timespec="seconds")
+    temporary = STATE_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(STATE_PATH)
+
+
+def session_expired(driver):
+    try:
+        body_text = " ".join(driver.find_element(By.TAG_NAME, "body").text.split())
+    except NoSuchElementException:
+        return False
+    return (
+        "未登录不能选课" in body_text
+        or "登录超时" in body_text
+        or any(element.is_displayed() for element in driver.find_elements(By.ID, "loginName"))
+    )
 
 
 def read_config():
@@ -319,7 +372,7 @@ def print_feedback(driver, label="选课"):
         if any(marker in feedback_text for marker in markers)
     ]
     log(f"[{label}结果] {', '.join(matched) if matched else '暂未识别明确结果'}")
-    return matched
+    return matched, feedback_text
 
 
 def click_confirm_dialogs(driver, timeout):
@@ -365,8 +418,8 @@ def click_confirm_dialogs(driver, timeout):
 def main():
     parser = argparse.ArgumentParser(description="持续检测方案内课程并自动补选")
     parser.add_argument("--courses", default="courses.json", help="课程配置文件路径")
-    parser.add_argument("--min-interval", type=float, default=10, help="最短刷新间隔，单位秒")
-    parser.add_argument("--max-interval", type=float, default=30, help="最长刷新间隔，单位秒")
+    parser.add_argument("--min-interval", type=float, default=60, help="最短刷新间隔，单位秒")
+    parser.add_argument("--max-interval", type=float, default=300, help="最长刷新间隔，单位秒")
     parser.add_argument("--timeout", type=float, default=30, help="页面元素等待时间")
     parser.add_argument("--dry-run", action="store_true", help="只检测，不点击选课和确定")
     parser.add_argument("--test-click", action="store_true", help="忽略已满状态，仅点击第一条匹配课程一次后退出")
@@ -381,12 +434,19 @@ def main():
     ):
         parser.error("参数必须满足 0 < min-interval <= max-interval、timeout > 0、missing-rounds > 0")
 
-    config = read_config()
-    keywords = read_courses(args.courses)
-    pending_keywords = list(dict.fromkeys(keywords))
     log_path = start_logging()
     log(f"日志文件：{log_path.resolve()}")
+    config = read_config()
+    keywords = read_courses(args.courses)
+    state = load_state(keywords)
+    pending_keywords = state["pending_keywords"]
     log(f"已启用课程关键词：{', '.join(pending_keywords)}")
+    if state["successful_courses"] or state["refresh_count"]:
+        log(
+            f"[状态恢复] 已成功课程={len(state['successful_courses'])}，"
+            f"待选关键词={', '.join(pending_keywords) or '无'}，"
+            f"累计刷新={state['refresh_count']}，上次运行={state['last_run_at'] or '无'}。"
+        )
     driver = build_driver()
     try:
         login(driver, config, args.timeout)
@@ -395,7 +455,7 @@ def main():
             test_click_first_matching_course(driver, pending_keywords, button_selector, args.timeout)
             return
         missing_rounds = 0
-        refresh_count = 0
+        refresh_count = state["refresh_count"]
         last_refresh_at = time.monotonic()
         success_count = 0
         failure_count = 0
@@ -406,7 +466,16 @@ def main():
                     f" 刷新次数={refresh_count} 成功={success_count} 失败={failure_count}"
                 )
                 return
+            if session_expired(driver):
+                save_state(state)
+                log("[会话] 检测到“未登录不能选课/登录超时”，保存状态并重新登录。")
+                login(driver, config, args.timeout)
+                grid_id, button_selector = open_plan_courses(driver, args.timeout)
+                log("[会话] 重新登录成功，已从待选目标继续。")
+                continue
             refresh_count += 1
+            state["refresh_count"] = refresh_count
+            save_state(state)
             refresh_started_at = time.monotonic()
             elapsed_since_refresh = refresh_started_at - last_refresh_at
             log(
@@ -414,6 +483,13 @@ def main():
                 f"距离上一轮刷新 {elapsed_since_refresh:.1f} 秒。"
             )
             if not click_refresh(driver):
+                if session_expired(driver):
+                    save_state(state)
+                    log("[会话] 刷新前发现登录已失效，保存状态并重新登录。")
+                    login(driver, config, args.timeout)
+                    grid_id, button_selector = open_plan_courses(driver, args.timeout)
+                    log("[会话] 重新登录成功，已从待选目标继续。")
+                    continue
                 driver.refresh()
                 grid_id, button_selector = open_plan_courses(driver, args.timeout)
             time.sleep(0.8)
@@ -459,19 +535,26 @@ def main():
                 driver.execute_script("arguments[0].click();", select_button)
                 log("[选课动作] 已点击选课按钮，等待确认弹窗。")
                 confirmed, _ = click_confirm_dialogs(driver, args.timeout)
-                result = print_feedback(driver)
+                result, feedback_text = print_feedback(driver)
                 if "成功" in result:
                     success_count += 1
                     completed = [keyword for keyword in pending_keywords if keyword in text]
                     pending_keywords = [
                         keyword for keyword in pending_keywords if keyword not in completed
                     ]
+                    state["successful_courses"].append(text)
+                    state["pending_keywords"] = pending_keywords
+                    state["last_failure_reason"] = ""
+                    save_state(state)
                     log(
                         f"[选课成功] 已完成目标：{', '.join(completed) or text[:100]}；"
                         f"剩余目标：{', '.join(pending_keywords) or '无'}。"
                     )
                 else:
                     failure_count += 1
+                    state["last_failure_reason"] = feedback_text[:500] or "网站未返回明确失败原因"
+                    state["pending_keywords"] = pending_keywords
+                    save_state(state)
                     log(
                         f"[选课失败/待重试] 本次未确认成功，保留目标课程；"
                         f"已处理确认弹窗 {confirmed} 个。"

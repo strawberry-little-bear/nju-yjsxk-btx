@@ -281,7 +281,7 @@ def print_feedback(driver, label="选课"):
     else:
         print(f"[{label}反馈] 未找到可见弹窗或提示框。")
 
-    page_text = " ".join(driver.find_element(By.TAG_NAME, "body").text.split())
+    feedback_text = " ".join(" ".join(texts).split())
     result_groups = {
         "成功": ("选课成功", "选择成功", "已选课程", "已选"),
         "失败-已满": ("已满", "满额", "无余量", "人数已满"),
@@ -292,9 +292,10 @@ def print_feedback(driver, label="选课"):
     matched = [
         group
         for group, markers in result_groups.items()
-        if any(marker in page_text for marker in markers)
+        if any(marker in feedback_text for marker in markers)
     ]
     print(f"[{label}结果] {', '.join(matched) if matched else '暂未识别明确结果'}")
+    return matched
 
 
 def click_confirm_dialogs(driver, timeout):
@@ -320,7 +321,15 @@ def click_confirm_dialogs(driver, timeout):
             )
         except TimeoutException:
             break
-        dialog_text = " ".join(confirm.find_element(By.XPATH, "ancestor::*[contains(@class, 'modal') or contains(@class, 'dialog')][1]").text.split()) if confirm.find_elements(By.XPATH, "ancestor::*[contains(@class, 'modal') or contains(@class, 'dialog')][1]") else " ".join(confirm.find_element(By.XPATH, "..//..").text.split())
+        dialog_ancestors = confirm.find_elements(
+            By.XPATH,
+            "ancestor::*[contains(@class, 'modal') or contains(@class, 'dialog')][1]",
+        )
+        dialog_text = (
+            " ".join(dialog_ancestors[0].text.split())
+            if dialog_ancestors
+            else " ".join(confirm.find_element(By.XPATH, "..//..").text.split())
+        )
         dialog_messages.append(dialog_text)
         print(f"[确认弹窗] 点击前内容：{dialog_text[:500]}")
         driver.execute_script("arguments[0].click();", confirm)
@@ -337,28 +346,53 @@ def main():
     parser.add_argument("--timeout", type=float, default=30, help="页面元素等待时间")
     parser.add_argument("--dry-run", action="store_true", help="只检测，不点击选课和确定")
     parser.add_argument("--test-click", action="store_true", help="忽略已满状态，仅点击第一条匹配课程一次后退出")
+    parser.add_argument("--missing-rounds", type=int, default=5, help="连续多少轮找不到待选关键词后退出")
     args = parser.parse_args()
 
-    if args.min_interval <= 0 or args.max_interval < args.min_interval or args.timeout <= 0:
-        parser.error("刷新间隔必须满足 0 < min-interval <= max-interval")
+    if (
+        args.min_interval <= 0
+        or args.max_interval < args.min_interval
+        or args.timeout <= 0
+        or args.missing_rounds <= 0
+    ):
+        parser.error("参数必须满足 0 < min-interval <= max-interval、timeout > 0、missing-rounds > 0")
 
     config = read_config()
     keywords = read_courses(args.courses)
-    print(f"已启用课程关键词：{', '.join(keywords)}")
+    pending_keywords = list(dict.fromkeys(keywords))
+    print(f"已启用课程关键词：{', '.join(pending_keywords)}")
     driver = build_driver()
     try:
         login(driver, config, args.timeout)
         grid_id, button_selector = open_plan_courses(driver, args.timeout)
         if args.test_click:
-            test_click_first_matching_course(driver, keywords, button_selector, args.timeout)
+            test_click_first_matching_course(driver, pending_keywords, button_selector, args.timeout)
             return
+        missing_rounds = 0
         while True:
+            if not pending_keywords:
+                print("[任务完成] 所有目标课程均已确认选课成功，结束循环。")
+                return
             if not click_refresh(driver):
                 driver.refresh()
                 grid_id, button_selector = open_plan_courses(driver, args.timeout)
             time.sleep(0.8)
-            matches = find_matching_courses(driver, keywords, button_selector)
-            print(f"[课程匹配] 本轮找到 {len(matches)} 条关键词匹配课程。")
+            matches = find_matching_courses(driver, pending_keywords, button_selector)
+            print(
+                f"[课程匹配] 本轮找到 {len(matches)} 条待选关键词课程；"
+                f"剩余目标：{', '.join(pending_keywords)}。"
+            )
+            if not matches:
+                missing_rounds += 1
+                print(
+                    f"[任务状态] 连续 {missing_rounds}/{args.missing_rounds} 轮"
+                    "没有找到剩余目标课程。"
+                )
+                if missing_rounds >= args.missing_rounds:
+                    print(f"[任务结束] 长时间未找到目标关键词：{', '.join(pending_keywords)}。")
+                    return
+            else:
+                missing_rounds = 0
             for index, (text, _, is_available) in enumerate(matches, start=1):
                 status = "有余量" if is_available else "已满/不可选"
                 print(f"[课程匹配 {index}] 已找到 [{status}]：{text[:180]}")
@@ -382,8 +416,21 @@ def main():
                 driver.execute_script("arguments[0].click();", select_button)
                 print("[选课动作] 已点击选课按钮，等待确认弹窗。")
                 confirmed, _ = click_confirm_dialogs(driver, args.timeout)
-                print_feedback(driver)
-                print(f"[选课结果] 已处理确认弹窗 {confirmed} 个，继续检测其他课程。")
+                result = print_feedback(driver)
+                if "成功" in result:
+                    completed = [keyword for keyword in pending_keywords if keyword in text]
+                    pending_keywords = [
+                        keyword for keyword in pending_keywords if keyword not in completed
+                    ]
+                    print(
+                        f"[选课成功] 已完成目标：{', '.join(completed) or text[:100]}；"
+                        f"剩余目标：{', '.join(pending_keywords) or '无'}。"
+                    )
+                else:
+                    print(
+                        f"[选课失败/待重试] 本次未确认成功，保留目标课程；"
+                        f"已处理确认弹窗 {confirmed} 个。"
+                    )
                 time.sleep(1)
             time.sleep(random.uniform(args.min_interval, args.max_interval))
     except (TimeoutException, NoSuchElementException) as error:

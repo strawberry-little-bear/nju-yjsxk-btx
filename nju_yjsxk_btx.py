@@ -90,11 +90,28 @@ def session_expired(driver):
         body_text = " ".join(driver.find_element(By.TAG_NAME, "body").text.split())
     except NoSuchElementException:
         return False
+    message_text = " ".join(
+        element.text.split()
+        for element in driver.find_elements(By.ID, "course_msgDiv")
+        if element.is_displayed()
+    )
     return (
-        "未登录不能选课" in body_text
+        "未登录不能选课" in message_text
+        or "未登录不能选课" in body_text
         or "登录超时" in body_text
         or any(element.is_displayed() for element in driver.find_elements(By.ID, "loginName"))
     )
+
+
+def recover_session(driver, config, timeout, state):
+    """Save the task, wait for a fresh manual login, and reopen the course page."""
+    save_state(state)
+    log("[会话] 检测到登录已失效，已保存 state.json。")
+    log("[会话] 正在重新打开登录页；请完成验证码并手动点击登录。")
+    login(driver, config, timeout)
+    grid_id, button_selector = open_plan_courses(driver, timeout)
+    log("[会话] 重新登录成功，已恢复课程列表和待选目标。")
+    return grid_id, button_selector
 
 
 def read_config():
@@ -467,11 +484,9 @@ def main():
                 )
                 return
             if session_expired(driver):
-                save_state(state)
-                log("[会话] 检测到“未登录不能选课/登录超时”，保存状态并重新登录。")
-                login(driver, config, args.timeout)
-                grid_id, button_selector = open_plan_courses(driver, args.timeout)
-                log("[会话] 重新登录成功，已从待选目标继续。")
+                grid_id, button_selector = recover_session(
+                    driver, config, args.timeout, state
+                )
                 continue
             refresh_count += 1
             state["refresh_count"] = refresh_count
@@ -484,16 +499,32 @@ def main():
             )
             if not click_refresh(driver):
                 if session_expired(driver):
-                    save_state(state)
-                    log("[会话] 刷新前发现登录已失效，保存状态并重新登录。")
-                    login(driver, config, args.timeout)
-                    grid_id, button_selector = open_plan_courses(driver, args.timeout)
-                    log("[会话] 重新登录成功，已从待选目标继续。")
+                    grid_id, button_selector = recover_session(
+                        driver, config, args.timeout, state
+                    )
                     continue
                 driver.refresh()
-                grid_id, button_selector = open_plan_courses(driver, args.timeout)
+                if session_expired(driver):
+                    grid_id, button_selector = recover_session(
+                        driver, config, args.timeout, state
+                    )
+                    continue
+                try:
+                    grid_id, button_selector = open_plan_courses(driver, args.timeout)
+                except TimeoutException:
+                    if not session_expired(driver):
+                        raise
+                    grid_id, button_selector = recover_session(
+                        driver, config, args.timeout, state
+                    )
+                    continue
             time.sleep(0.8)
             last_refresh_at = time.monotonic()
+            if session_expired(driver):
+                grid_id, button_selector = recover_session(
+                    driver, config, args.timeout, state
+                )
+                continue
             matches = find_matching_courses(driver, pending_keywords, button_selector)
             log(
                 f"[课程匹配] 本轮找到 {len(matches)} 条待选关键词课程；"

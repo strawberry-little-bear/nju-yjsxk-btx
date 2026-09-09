@@ -8,3 +8,4 @@ config.json
 .chrome-profile-*/
 .chrome-profile/
 .selenium-cache/
+log/

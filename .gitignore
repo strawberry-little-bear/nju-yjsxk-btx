@@ -1,12 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
 .venv
-__pycache__
-*.lock
-webDriver/
-**.DS_Store
+venv/
+env/
+
+# 本地真实配置（含账号密码），禁止提交
 config.json
-*.bak
-.chrome-profile-*/
-.chrome-profile/
-.selenium-cache/
-log/
+
+# 运行状态与输出（自动生成）
 state.json
+ocr_output.txt
+
+# Captcha outputs
+captcha_screenshots/
+
+# Chrome temp profiles used by Selenium
+.chrome-profile/
+.chrome-profile-*/
+
+# Logs
+log/
+*.log
+
+# Selenium cache
+.selenium-cache/

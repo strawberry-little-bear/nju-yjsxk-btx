@@ -107,7 +107,7 @@ def recover_session(driver, config, timeout, state):
     """Save the task, wait for a fresh manual login, and reopen the course page."""
     save_state(state)
     log("[会话] 检测到登录已失效，已保存 state.json。")
-    log("[会话] 正在重新打开登录页；请完成验证码并手动点击登录。")
+    log("[会话] 正在重新打开登录页；使用 login_helper 自动重新登录（OCR 识别验证码）。")
     login(driver, config, timeout)
     grid_id, button_selector = open_plan_courses(driver, timeout)
     log("[会话] 重新登录成功，已恢复课程列表和待选目标。")
@@ -165,7 +165,11 @@ def _print_page_snippet(driver, label):
             continue
 
 
-def login(driver, config, timeout):
+_USE_LOGIN_HELPER = False
+_LOGIN_MAX_ATTEMPTS = 6
+
+
+def _manual_login(driver, config, timeout):
     driver.get(config["url"])
     wait = WebDriverWait(driver, timeout)
 
@@ -240,6 +244,22 @@ def login(driver, config, timeout):
     driver.get(course_url)
     wait.until(lambda current_driver: "course_nju.html" in current_driver.current_url)
     log("已进入课程页面，开始检测课程。")
+
+
+def login(driver, config, timeout):
+    """登录入口：默认走原有人工登录；启用 --use-login-helper 时改用 login_helper 模块。"""
+    if _USE_LOGIN_HELPER:
+        from login_helper import perform_login
+        perform_login(driver, config, timeout=timeout, max_attempts=_LOGIN_MAX_ATTEMPTS)
+        wait = WebDriverWait(driver, timeout)
+        base_url = driver.current_url.split("/sys/")[0]
+        course_url = base_url + "/sys/xsxkapp/course_nju.html"
+        driver.get(course_url)
+        wait.until(lambda current_driver: "course_nju.html" in current_driver.current_url)
+        log("已进入课程页面，开始检测课程。")
+        return
+    _manual_login(driver, config, timeout)
+
 
 
 def click_refresh(driver):
@@ -441,15 +461,21 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只检测，不点击选课和确定")
     parser.add_argument("--test-click", action="store_true", help="忽略已满状态，仅点击第一条匹配课程一次后退出")
     parser.add_argument("--missing-rounds", type=int, default=5, help="连续多少轮找不到待选关键词后退出")
+    parser.add_argument("--use-login-helper", action="store_true", help="使用 login_helper + OCR 全自动登录（默认关闭）")
+    parser.add_argument("--login-max-attempts", type=int, default=6, help="login_helper 自动登录最大尝试次数")
     args = parser.parse_args()
+    global _USE_LOGIN_HELPER, _LOGIN_MAX_ATTEMPTS
+    _USE_LOGIN_HELPER = args.use_login_helper
+    _LOGIN_MAX_ATTEMPTS = args.login_max_attempts
 
     if (
         args.min_interval <= 0
         or args.max_interval < args.min_interval
         or args.timeout <= 0
         or args.missing_rounds <= 0
+        or args.login_max_attempts <= 0
     ):
-        parser.error("参数必须满足 0 < min-interval <= max-interval、timeout > 0、missing-rounds > 0")
+        parser.error("参数必须满足 0 < min-interval <= max-interval、timeout > 0、missing-rounds > 0、login-max-attempts > 0")
 
     log_path = start_logging()
     log(f"日志文件：{log_path.resolve()}")

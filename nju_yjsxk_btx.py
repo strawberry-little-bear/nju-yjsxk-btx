@@ -4,11 +4,16 @@ import argparse
 import json
 import random
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 from selenium import webdriver
-from selenium.common import NoSuchElementException, TimeoutException
+from selenium.common import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -17,6 +22,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 
 UNAVAILABLE_MARKERS = ("已满", "满额", "无余量", "不可选")
+LOGIN_EXPIRED_MARKERS = (
+    "未登录不能选课",
+    "登录超时",
+    "会话已过期",
+    "登录已失效",
+    "请重新登录",
+    "重新登录",
+)
+MAX_CONSECUTIVE_RECOVERIES = 3
 _LOG_FILE = None
 STATE_PATH = Path("state.json")
 
@@ -86,21 +100,74 @@ def save_state(state):
 
 
 def session_expired(driver):
+    """判断当前页面是否处于登录失效状态。
+
+    尽量不抛异常：页面正在跳转、出现 JS 弹窗或元素失效时，检测失败一律视为
+    “暂未确认失效”，由监控循环的异常安全网兜底处理。
+    """
+    body_text = ""
+    body_html = ""
     try:
-        body_text = " ".join(driver.find_element(By.TAG_NAME, "body").text.split())
+        body_element = driver.find_element(By.TAG_NAME, "body")
+        body_text = " ".join(body_element.text.split())
+        body_html = " ".join((body_element.get_attribute("textContent") or "").split())
     except NoSuchElementException:
         return False
-    message_text = " ".join(
-        element.text.split()
-        for element in driver.find_elements(By.ID, "course_msgDiv")
-        if element.is_displayed()
-    )
+    except Exception:
+        return False
+    message_text = ""
+    try:
+        for element in driver.find_elements(By.ID, "course_msgDiv"):
+            try:
+                value = " ".join(
+                    (element.text or element.get_attribute("textContent") or "").split()
+                )
+                if value:
+                    message_text += " " + value
+            except StaleElementReferenceException:
+                continue
+    except Exception:
+        pass
+    try:
+        login_visible = any(
+            element.is_displayed()
+            for element in driver.find_elements(By.ID, "loginName")
+        )
+    except Exception:
+        login_visible = False
+    try:
+        current_url = (driver.current_url or "").lower()
+    except Exception:
+        current_url = ""
+    url_is_login = any(part in current_url for part in ("index_nju", "/login", "login.do"))
+    haystack = " ".join((body_text + " " + body_html + " " + message_text).split())
     return (
-        "未登录不能选课" in message_text
-        or "未登录不能选课" in body_text
-        or "登录超时" in body_text
-        or any(element.is_displayed() for element in driver.find_elements(By.ID, "loginName"))
+        login_visible
+        or url_is_login
+        or any(marker in haystack for marker in LOGIN_EXPIRED_MARKERS)
     )
+
+
+def handle_possible_alert(driver):
+    """如果页面上有 JS alert/confirm，读取内容并确认关闭，返回弹窗文本（无则空串）。"""
+    try:
+        alert = driver.switch_to.alert
+    except Exception:
+        return ""
+    try:
+        text = (alert.text or "").strip()
+    except Exception:
+        text = ""
+    try:
+        alert.accept()
+    except Exception:
+        try:
+            alert.dismiss()
+        except Exception:
+            pass
+    if text:
+        log(f"[弹窗] 检测到并已关闭 JS 弹窗：{text[:200]}")
+    return text
 
 
 def recover_session(driver, config, timeout, state):
@@ -270,9 +337,13 @@ def click_refresh(driver):
         "//*[(@title='刷新' or @aria-label='刷新')]",
     )
     for button in buttons:
-        if button.is_displayed() and button.is_enabled():
-            driver.execute_script("arguments[0].click();", button)
-            return True
+        try:
+            if button.is_displayed() and button.is_enabled():
+                driver.execute_script("arguments[0].click();", button)
+                return True
+        except StaleElementReferenceException:
+            # 页面正在重绘导致元素失效，跳过该按钮，交给刷新/重试路径处理。
+            continue
     return False
 
 
@@ -320,10 +391,14 @@ def open_plan_courses(driver, timeout):
 def find_matching_courses(driver, keywords, button_selector):
     results = []
     for button in driver.find_elements(By.CSS_SELECTOR, button_selector):
-        if not button.is_displayed() or not button.is_enabled():
+        try:
+            if not button.is_displayed() or not button.is_enabled():
+                continue
+            row = button.find_element(By.XPATH, "ancestor::tr[1]")
+            text = " ".join(row.text.split())
+        except StaleElementReferenceException:
+            # 页面正在重绘导致元素失效，跳过该行。
             continue
-        row = button.find_element(By.XPATH, "ancestor::tr[1]")
-        text = " ".join(row.text.split())
         if keywords and not any(keyword in text for keyword in keywords):
             continue
         available = not any(marker in text for marker in UNAVAILABLE_MARKERS)
@@ -502,131 +577,201 @@ def main():
         last_refresh_at = time.monotonic()
         success_count = 0
         failure_count = 0
+        consecutive_recoveries = 0
+
+        def do_recover(reason):
+            nonlocal grid_id, button_selector, consecutive_recoveries
+            consecutive_recoveries += 1
+            if consecutive_recoveries > MAX_CONSECUTIVE_RECOVERIES:
+                log(
+                    f"[会话] 连续 {MAX_CONSECUTIVE_RECOVERIES} 次自动恢复失败，"
+                    "停止自动恢复并退出。"
+                )
+                raise RuntimeError(
+                    f"连续 {MAX_CONSECUTIVE_RECOVERIES} 次自动恢复登录失败"
+                )
+            log(f"[会话] 自动恢复（第 {consecutive_recoveries} 次）：{reason}")
+            grid_id, button_selector = recover_session(
+                driver, config, args.timeout, state
+            )
+            consecutive_recoveries = 0
+            log("[会话] 自动恢复完成，继续监控。")
+
         while True:
-            if not pending_keywords:
-                log(
-                    f"[任务完成] 所有目标课程均已确认选课成功，结束循环。"
-                    f" 刷新次数={refresh_count} 成功={success_count} 失败={failure_count}"
-                )
-                return
-            if session_expired(driver):
-                grid_id, button_selector = recover_session(
-                    driver, config, args.timeout, state
-                )
-                continue
-            refresh_count += 1
-            state["refresh_count"] = refresh_count
-            save_state(state)
-            refresh_started_at = time.monotonic()
-            elapsed_since_refresh = refresh_started_at - last_refresh_at
-            log(
-                f"[刷新] 第 {refresh_count} 次刷新开始；"
-                f"距离上一轮刷新 {elapsed_since_refresh:.1f} 秒。"
-            )
-            if not click_refresh(driver):
-                if session_expired(driver):
-                    grid_id, button_selector = recover_session(
-                        driver, config, args.timeout, state
+            try:
+                handle_possible_alert(driver)
+                if not pending_keywords:
+                    log(
+                        f"[任务完成] 所有目标课程均已确认选课成功，结束循环。"
+                        f" 刷新次数={refresh_count} 成功={success_count} 失败={failure_count}"
                     )
-                    continue
-                driver.refresh()
-                if session_expired(driver):
-                    grid_id, button_selector = recover_session(
-                        driver, config, args.timeout, state
-                    )
-                    continue
-                try:
-                    grid_id, button_selector = open_plan_courses(driver, args.timeout)
-                except TimeoutException:
-                    if not session_expired(driver):
-                        raise
-                    grid_id, button_selector = recover_session(
-                        driver, config, args.timeout, state
-                    )
-                    continue
-            time.sleep(0.8)
-            last_refresh_at = time.monotonic()
-            if session_expired(driver):
-                grid_id, button_selector = recover_session(
-                    driver, config, args.timeout, state
-                )
-                continue
-            matches = find_matching_courses(driver, pending_keywords, button_selector)
-            log(
-                f"[课程匹配] 本轮找到 {len(matches)} 条待选关键词课程；"
-                f"剩余目标：{', '.join(pending_keywords)}。"
-            )
-            if not matches:
-                missing_rounds += 1
-                log(
-                    f"[任务状态] 连续 {missing_rounds}/{args.missing_rounds} 轮"
-                    "没有找到剩余目标课程。"
-                )
-                if missing_rounds >= args.missing_rounds:
-                    log(f"[任务结束] 长时间未找到目标关键词：{', '.join(pending_keywords)}。")
                     return
-            else:
-                missing_rounds = 0
-            for index, (text, _, is_available) in enumerate(matches, start=1):
-                status = "有余量" if is_available else "已满/不可选"
-                log(f"[课程匹配 {index}] 已找到 [{status}]：{text[:180]}")
-                if not is_available:
-                    log(f"[选课动作 {index}] 跳过点击：课程已满或不可选。")
-            available = [(text, button) for text, button, is_available in matches if is_available]
-            if not available:
-                if matches:
-                    log("[选课结果] 找到了关键词课程，但当前没有可选课程，继续刷新。")
+                if session_expired(driver):
+                    do_recover("监测点发现登录已失效")
+                    continue
+                refresh_count += 1
+                state["refresh_count"] = refresh_count
+                save_state(state)
+                refresh_started_at = time.monotonic()
+                elapsed_since_refresh = refresh_started_at - last_refresh_at
+                log(
+                    f"[刷新] 第 {refresh_count} 次刷新开始；"
+                    f"距离上一轮刷新 {elapsed_since_refresh:.1f} 秒。"
+                )
+                if not click_refresh(driver):
+                    if session_expired(driver):
+                        do_recover("刷新前发现登录已失效")
+                        continue
+                    driver.refresh()
+                    if session_expired(driver):
+                        do_recover("刷新后立即发现登录已失效")
+                        continue
+                    try:
+                        grid_id, button_selector = open_plan_courses(driver, args.timeout)
+                    except TimeoutException:
+                        log("[会话] 刷新后课程列表未正常出现（可能已掉线），尝试自动恢复登录。")
+                        do_recover("刷新后课程列表超时未出现")
+                        continue
+                time.sleep(0.8)
+                last_refresh_at = time.monotonic()
+                if session_expired(driver):
+                    do_recover("刷新后监测点发现登录已失效")
+                    continue
+                matches = find_matching_courses(driver, pending_keywords, button_selector)
+                log(
+                    f"[课程匹配] 本轮找到 {len(matches)} 条待选关键词课程；"
+                    f"剩余目标：{', '.join(pending_keywords)}。"
+                )
+                if not matches:
+                    missing_rounds += 1
+                    log(
+                        f"[任务状态] 连续 {missing_rounds}/{args.missing_rounds} 轮"
+                        "没有找到剩余目标课程。"
+                    )
+                    if missing_rounds >= args.missing_rounds:
+                        log(f"[任务结束] 长时间未找到目标关键词：{', '.join(pending_keywords)}。")
+                        return
                 else:
-                    log("[选课结果] 本轮没有找到关键词对应课程，继续刷新。")
+                    missing_rounds = 0
+                for index, (text, _, is_available) in enumerate(matches, start=1):
+                    status = "有余量" if is_available else "已满/不可选"
+                    log(f"[课程匹配 {index}] 已找到 [{status}]：{text[:180]}")
+                    if not is_available:
+                        log(f"[选课动作 {index}] 跳过点击：课程已满或不可选。")
+                available = [(text, button) for text, button, is_available in matches if is_available]
+                if not available:
+                    if matches:
+                        log("[选课结果] 找到了关键词课程，但当前没有可选课程，继续刷新。")
+                    else:
+                        log("[选课结果] 本轮没有找到关键词对应课程，继续刷新。")
+                    delay = random.uniform(args.min_interval, args.max_interval)
+                    log(f"[等待] 下一轮刷新将在 {delay:.1f} 秒后开始。")
+                    time.sleep(delay)
+                    continue
+
+                for text, select_button in available:
+                    log(f"[选课动作] 找到有余量课程，准备点击选课按钮：{text[:180]}")
+                    if args.dry_run:
+                        log("[选课结果] 当前为 --dry-run，已跳过实际点击。")
+                        continue
+
+                    driver.execute_script("arguments[0].click();", select_button)
+                    log("[选课动作] 已点击选课按钮，等待确认弹窗。")
+                    confirmed, _ = click_confirm_dialogs(driver, args.timeout)
+                    result, feedback_text = print_feedback(driver)
+                    if "成功" in result:
+                        success_count += 1
+                        completed = [keyword for keyword in pending_keywords if keyword in text]
+                        pending_keywords = [
+                            keyword for keyword in pending_keywords if keyword not in completed
+                        ]
+                        state["successful_courses"].append(text)
+                        state["pending_keywords"] = pending_keywords
+                        state["last_failure_reason"] = ""
+                        save_state(state)
+                        log(
+                            f"[选课成功] 已完成目标：{', '.join(completed) or text[:100]}；"
+                            f"剩余目标：{', '.join(pending_keywords) or '无'}。"
+                        )
+                    else:
+                        failure_count += 1
+                        state["last_failure_reason"] = feedback_text[:500] or "网站未返回明确失败原因"
+                        state["pending_keywords"] = pending_keywords
+                        save_state(state)
+                        log(
+                            f"[选课失败/待重试] 本次未确认成功，保留目标课程；"
+                            f"已处理确认弹窗 {confirmed} 个。"
+                        )
+                    time.sleep(1)
                 delay = random.uniform(args.min_interval, args.max_interval)
                 log(f"[等待] 下一轮刷新将在 {delay:.1f} 秒后开始。")
                 time.sleep(delay)
+            except Exception as error:
+                log(f"[异常] 监控循环出现未处理异常：{error!r}")
+                log("[异常] traceback: " + traceback.format_exc().replace("\n", " | "))
+                alert_text = handle_possible_alert(driver)
+                if alert_text:
+                    log(f"[异常] 捕获到 JS 弹窗内容：{alert_text[:200]}")
+                expired = session_expired(driver) or any(
+                    marker in alert_text for marker in LOGIN_EXPIRED_MARKERS
+                )
+                if not expired:
+                    log("[会话] 异常后未确认登录失效，退出监控循环。")
+                    try:
+                        _print_page_snippet(driver, "异常页")
+                    except Exception as snippet_error:
+                        log(f"[异常] 页面信息采集失败：{snippet_error!r}")
+                    raise
+                recovered = False
+                while consecutive_recoveries < MAX_CONSECUTIVE_RECOVERIES:
+                    log(
+                        "[会话] 异常后页面呈未登录状态，进入自动恢复"
+                        f"（第 {consecutive_recoveries + 1} 次）。"
+                    )
+                    try:
+                        do_recover("异常安全网：页面呈未登录状态")
+                    except Exception as recover_error:
+                        log(f"[会话] 自动恢复失败：{recover_error!r}")
+                        log(
+                            "[会话] 恢复失败 traceback: "
+                            + traceback.format_exc().replace("\n", " | ")
+                        )
+                        continue
+                    recovered = True
+                    break
+                if not recovered:
+                    log(
+                        f"[会话] 连续 {MAX_CONSECUTIVE_RECOVERIES} 次自动恢复失败，"
+                        "退出监控循环。"
+                    )
+                    try:
+                        _print_page_snippet(driver, "异常页")
+                    except Exception as snippet_error:
+                        log(f"[异常] 页面信息采集失败：{snippet_error!r}")
+                    raise RuntimeError(
+                        f"连续 {MAX_CONSECUTIVE_RECOVERIES} 次自动恢复登录失败"
+                    )
                 continue
 
-            for text, select_button in available:
-                log(f"[选课动作] 找到有余量课程，准备点击选课按钮：{text[:180]}")
-                if args.dry_run:
-                    log("[选课结果] 当前为 --dry-run，已跳过实际点击。")
-                    continue
-
-                driver.execute_script("arguments[0].click();", select_button)
-                log("[选课动作] 已点击选课按钮，等待确认弹窗。")
-                confirmed, _ = click_confirm_dialogs(driver, args.timeout)
-                result, feedback_text = print_feedback(driver)
-                if "成功" in result:
-                    success_count += 1
-                    completed = [keyword for keyword in pending_keywords if keyword in text]
-                    pending_keywords = [
-                        keyword for keyword in pending_keywords if keyword not in completed
-                    ]
-                    state["successful_courses"].append(text)
-                    state["pending_keywords"] = pending_keywords
-                    state["last_failure_reason"] = ""
-                    save_state(state)
-                    log(
-                        f"[选课成功] 已完成目标：{', '.join(completed) or text[:100]}；"
-                        f"剩余目标：{', '.join(pending_keywords) or '无'}。"
-                    )
-                else:
-                    failure_count += 1
-                    state["last_failure_reason"] = feedback_text[:500] or "网站未返回明确失败原因"
-                    state["pending_keywords"] = pending_keywords
-                    save_state(state)
-                    log(
-                        f"[选课失败/待重试] 本次未确认成功，保留目标课程；"
-                        f"已处理确认弹窗 {confirmed} 个。"
-                    )
-                time.sleep(1)
-            delay = random.uniform(args.min_interval, args.max_interval)
-            log(f"[等待] 下一轮刷新将在 {delay:.1f} 秒后开始。")
-            time.sleep(delay)
     except (TimeoutException, NoSuchElementException) as error:
         log(f"页面元素等待失败：{error}")
-        log(f"当前 URL：{driver.current_url}")
-        log(f"页面标题：{driver.title}")
-        _print_page_snippet(driver, "异常页")
-        tabs = driver.find_elements(By.CSS_SELECTOR, "#xkTabContainer [cv-role='tab']")
-        log("可见标签：" + " | ".join(tab.text.strip() for tab in tabs if tab.is_displayed()))
+        log("traceback: " + traceback.format_exc().replace("\n", " | "))
+        try:
+            log(f"当前 URL：{driver.current_url}")
+            log(f"页面标题：{driver.title}")
+            _print_page_snippet(driver, "异常页")
+            tabs = driver.find_elements(By.CSS_SELECTOR, "#xkTabContainer [cv-role='tab']")
+            log("可见标签：" + " | ".join(tab.text.strip() for tab in tabs if tab.is_displayed()))
+        except Exception as diagnostic_error:
+            log(f"[异常] 异常信息采集失败：{diagnostic_error!r}")
+        raise SystemExit(1) from error
+    except Exception as error:
+        log(f"[异常] 程序意外结束：{error!r}")
+        log("traceback: " + traceback.format_exc().replace("\n", " | "))
+        try:
+            _print_page_snippet(driver, "异常页")
+        except Exception as diagnostic_error:
+            log(f"[异常] 异常信息采集失败：{diagnostic_error!r}")
         raise SystemExit(1) from error
     finally:
         log("程序结束。日志已保存。按回车关闭浏览器...")

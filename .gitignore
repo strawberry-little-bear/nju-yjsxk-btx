@@ -28,3 +28,6 @@ log/
 
 # Selenium cache
 .selenium-cache/
+
+# Dashboard runtime marker
+.dashboard-process.json

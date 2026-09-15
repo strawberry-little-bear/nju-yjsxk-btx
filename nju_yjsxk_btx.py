@@ -8,17 +8,16 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from selenium import webdriver
 from selenium.common import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
 )
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import WebDriverWait
+
+from browser_support import build_driver
 
 
 UNAVAILABLE_MARKERS = ("已满", "满额", "无余量", "不可选")
@@ -196,26 +195,6 @@ def read_courses(path):
     if not keywords:
         raise ValueError("courses.json 中没有启用的课程关键词")
     return keywords
-
-
-def build_driver():
-    options = Options()
-    # 使用项目目录下的独立配置，避免占用用户正在使用的 Chrome 配置。
-    profile_dir = Path.cwd() / f".chrome-profile-{datetime.now():%Y%m%d-%H%M%S-%f}"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    options.add_argument(f"--user-data-dir={profile_dir}")
-    options.add_argument("--disable-gpu")
-    # 优先使用 webdriver_manager 已下载的本地驱动，避免受限环境下再次联网下载。
-    cached_driver = (
-        Path.home()
-        / ".wdm/drivers/chromedriver/win64/152.0.7977.82/chromedriver-win64/chromedriver.exe"
-    )
-    if cached_driver.exists():
-        driver = webdriver.Chrome(service=Service(str(cached_driver)), options=options)
-    else:
-        driver = webdriver.Chrome(options=options)
-    driver.set_window_size(1200, 900)
-    return driver
 
 
 def _print_page_snippet(driver, label):

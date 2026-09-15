@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NJU 选课助手 - 控制台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #1e1e2e; }
+        ::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #585b70; }
+
+        .log-line { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.6; }
+        .log-success { color: #a6e3a1; }
+        .log-error { color: #f38ba8; }
+        .log-warn { color: #f9e2af; }
+        .log-info { color: #89b4fa; }
+        .log-dim { color: #6c7086; }
+
+        .status-dot {
+            width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+        }
+        .status-dot.running { background: #a6e3a1; box-shadow: 0 0 6px #a6e3a1; animation: pulse 2s infinite; }
+        .status-dot.stopped { background: #6c7086; }
+        .status-dot.error { background: #f38ba8; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .card {
+            background: #181825;
+            border: 1px solid #313244;
+            border-radius: 12px;
+        }
+
+        .btn {
+            padding: 8px 20px; border-radius: 8px; font-weight: 600; font-size: 14px;
+            cursor: pointer; transition: all 0.2s; border: none; outline: none;
+        }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-start { background: #a6e3a1; color: #1e1e2e; }
+        .btn-start:hover:not(:disabled) { background: #94e2d5; }
+        .btn-stop { background: #f38ba8; color: #1e1e2e; }
+        .btn-stop:hover:not(:disabled) { background: #eba0ac; }
+
+        .toggle-checkbox:checked {
+            right: 0; border-color: #89b4fa;
+        }
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #89b4fa;
+        }
+    </style>
+</head>
+<body class="bg-[#11111b] text-[#cdd6f4] min-h-screen">
+
+<!-- Header -->
+<header class="border-b border-[#313244] px-6 py-4">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="text-2xl">🎓</div>
+            <div>
+                <h1 class="text-lg font-bold text-[#cdd6f4]">NJU 选课助手</h1>
+                <p class="text-xs text-[#6c7086]">研究生选课自动化控制台</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-4">
+            <div id="login-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#181825] border border-[#313244]">
+                <span class="status-dot stopped" id="login-dot"></span>
+                <span class="text-sm" id="login-text">未登录</span>
+            </div>
+            <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#181825] border border-[#313244]">
+                <span class="status-dot stopped" id="process-dot"></span>
+                <span class="text-sm" id="process-text">已停止</span>
+            </div>
+        </div>
+    </div>
+</header>
+
+<main class="max-w-7xl mx-auto p-6 space-y-6">
+
+    <!-- Config Management -->
+    <div class="card p-5">
+        <h2 class="text-sm font-semibold text-[#bac2de] uppercase tracking-wider mb-4">配置管理</h2>
+        <p class="text-xs text-[#6c7086] -mt-2 mb-4" id="config-save-time"></p>
+
+        <!-- Tabs -->
+        <div class="flex gap-1 mb-4 bg-[#11111b] p-1 rounded-lg w-fit">
+            <button onclick="switchTab('account')" id="tab-account"
+                    class="tab-btn px-4 py-1.5 rounded-md text-sm font-medium transition-all bg-[#313244] text-[#cdd6f4]">
+                账号配置
+            </button>
+            <button onclick="switchTab('courses')" id="tab-courses"
+                    class="tab-btn px-4 py-1.5 rounded-md text-sm font-medium transition-all text-[#6c7086] hover:text-[#cdd6f4]">
+                课程管理
+            </button>
+        </div>
+
+        <!-- Account Tab -->
+        <div id="panel-account" class="tab-panel">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
+                <div>
+                    <label class="block text-xs text-[#a6adc8] mb-1.5">学号</label>
+                    <input type="text" id="cfg-user-id" placeholder="请输入学号"
+                           class="w-full bg-[#1e1e2e] border border-[#313244] rounded-lg px-3 py-2 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]">
+                </div>
+                <div>
+                    <label class="block text-xs text-[#a6adc8] mb-1.5">系统地址</label>
+                    <input type="text" id="cfg-url" placeholder="https://yjsxk.nju.edu.cn"
+                           class="w-full bg-[#1e1e2e] border border-[#313244] rounded-lg px-3 py-2 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]">
+                </div>
+                <div class="md:col-span-2">
+                    <label class="block text-xs text-[#a6adc8] mb-1.5">密码</label>
+                    <div class="flex gap-2">
+                        <div class="flex-1 relative">
+                            <input type="password" id="cfg-password" placeholder="留空则不修改现有密码"
+                                   class="w-full bg-[#1e1e2e] border border-[#313244] rounded-lg px-3 py-2 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa] pr-10">
+                            <button onclick="togglePasswordVisibility()" class="absolute right-2 top-1/2 -translate-y-1/2 text-[#6c7086] hover:text-[#cdd6f4] text-xs">
+                                👁
+                            </button>
+                        </div>
+                    </div>
+                    <p class="text-xs text-[#6c7086] mt-1">留空表示不修改密码。密码不会以明文显示。</p>
+                </div>
+            </div>
+            <div class="mt-4 flex items-center gap-3">
+                <button onclick="saveAccount()" class="btn btn-start">保存账号配置</button>
+                <span id="account-save-status" class="text-sm"></span>
+            </div>
+        </div>
+
+        <!-- Courses Tab -->
+        <div id="panel-courses" class="tab-panel hidden">
+            <div id="courses-edit-list" class="space-y-3 max-w-3xl">
+                <!-- dynamically filled -->
+            </div>
+            <button onclick="addCourse()" class="mt-4 text-sm text-[#89b4fa] hover:text-[#74c7ec] font-medium transition-colors">
+                + 添加课程
+            </button>
+            <div class="mt-4 flex items-center gap-3">
+                <button onclick="saveCourses()" class="btn btn-start">保存课程配置</button>
+                <span id="courses-save-status" class="text-sm"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Controls + Stats Row -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Control Panel -->
+        <div class="card p-5">
+            <h2 class="text-sm font-semibold text-[#bac2de] uppercase tracking-wider mb-4">控制面板</h2>
+
+            <div class="space-y-4">
+                <!-- Mode -->
+                <div>
+                    <label class="block text-xs text-[#a6adc8] mb-1.5">登录模式</label>
+                    <select id="mode" class="w-full bg-[#1e1e2e] border border-[#313244] rounded-lg px-3 py-2 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]">
+                        <option value="manual">人工验证码（手动输入）</option>
+                        <option value="auto">OCR 自动识别（无人值守）</option>
+                    </select>
+                </div>
+
+                <!-- Dry Run Toggle -->
+                <div class="flex items-center justify-between">
+                    <div>
+                        <span class="text-sm text-[#cdd6f4]">安全检测模式</span>
+                        <p class="text-xs text-[#6c7086]">只检测课程，不实际点击</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="dry-run" class="sr-only peer">
+                        <div class="w-11 h-6 bg-[#313244] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#89b4fa] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#89b4fa]"></div>
+                    </label>
+                </div>
+
+                <!-- Intervals -->
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-[#a6adc8] mb-1.5">最小间隔 (秒)</label>
+                        <input type="number" id="min-interval" value="60" min="10"
+                               class="w-full bg-[#1e1e2e] border border-[#313244] rounded-lg px-3 py-2 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-[#a6adc8] mb-1.5">最大间隔 (秒)</label>
+                        <input type="number" id="max-interval" value="300" min="10"
+                               class="w-full bg-[#1e1e2e] border border-[#313244] rounded-lg px-3 py-2 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]">
+                    </div>
+                </div>
+
+                <!-- Buttons -->
+                <div class="flex gap-3 pt-2">
+                    <button id="btn-start" class="btn btn-start flex-1" onclick="startScript()">
+                        ▶ 启动
+                    </button>
+                    <button id="btn-stop" class="btn btn-stop flex-1" onclick="stopScript()" disabled>
+                        ■ 停止
+                    </button>
+                </div>
+
+                <!-- Process info -->
+                <div id="process-info" class="hidden">
+                    <div class="text-xs text-[#6c7086] bg-[#1e1e2e] rounded-lg p-3 font-mono break-all">
+                        <span id="process-pid"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="lg:col-span-2 grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div class="card p-4 text-center">
+                <div class="text-3xl font-bold text-[#89b4fa]" id="stat-refresh">0</div>
+                <div class="text-xs text-[#6c7086] mt-1">累计刷新</div>
+            </div>
+            <div class="card p-4 text-center">
+                <div class="text-3xl font-bold text-[#a6e3a1]" id="stat-success">0</div>
+                <div class="text-xs text-[#6c7086] mt-1">已选成功</div>
+            </div>
+            <div class="card p-4 text-center">
+                <div class="text-3xl font-bold text-[#f9e2af]" id="stat-pending">0</div>
+                <div class="text-xs text-[#6c7086] mt-1">待选目标</div>
+            </div>
+            <div class="card p-4 text-center">
+                <div class="text-3xl font-bold text-[#cba6f7]" id="stat-last-run">--</div>
+                <div class="text-xs text-[#6c7086] mt-1">上次运行</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Course List -->
+    <div class="card p-5">
+        <h2 class="text-sm font-semibold text-[#bac2de] uppercase tracking-wider mb-4">课程状态</h2>
+        <div id="course-list" class="space-y-2">
+            <div class="text-sm text-[#6c7086]">加载中...</div>
+        </div>
+    </div>
+
+    <!-- Live Log -->
+    <div class="card p-5">
+        <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-3">
+                <h2 class="text-sm font-semibold text-[#bac2de] uppercase tracking-wider">实时日志</h2>
+                <div class="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#1e1e2e] border border-[#313244]">
+                    <span class="status-dot stopped" id="log-status-dot"></span>
+                    <span class="text-xs text-[#6c7086]" id="log-status-text">未连接</span>
+                </div>
+            </div>
+            <button onclick="clearLog()" class="text-xs text-[#6c7086] hover:text-[#cdd6f4] transition-colors">
+                清空
+            </button>
+        </div>
+        <div id="log-container" class="bg-[#11111b] rounded-lg p-4 h-[400px] overflow-y-auto border border-[#313244]">
+            <div id="log-content" class="log-line text-[#6c7086]">
+                <div class="log-dim">等待日志输出...</div>
+            </div>
+        </div>
+    </div>
+
+</main>
+
+<script>
+// ---- State ----
+const DASHBOARD_TOKEN = {{ dashboard_token|tojson }};
+let logLines = [];
+const MAX_LOG_LINES = 500;
+let sseConnected = false;
+let sseInstance = null;
+
+// ---- SSE ----
+function connectSSE() {
+    if (sseInstance) {
+        sseInstance.close();
+    }
+    const evtSource = new EventSource('/api/logs/stream');
+    sseInstance = evtSource;
+    evtSource.onopen = () => {
+        sseConnected = true;
+        updateLogStatus();
+        // SSE 只推送新日志，连接建立后主动加载已有日志。
+        apiGet('/api/logs?tail=100').then(data => {
+            if (data.lines && data.lines.length > 0) {
+                logLines = [];
+                document.getElementById('log-content').innerHTML = '';
+                appendLog(data.lines);
+            }
+        }).catch(() => {});
+    };
+    evtSource.onerror = () => {
+        sseConnected = false;
+        updateLogStatus();
+        // 断线重连时补拉最近 100 行日志，避免空白
+        apiGet('/api/logs?tail=100').then(data => {
+            if (data.lines && data.lines.length > 0) {
+                const newLines = data.lines.filter(l => !logLines.includes(l));
+                if (newLines.length > 0) {
+                    appendLog(newLines);
+                }
+            }
+        }).catch(() => {});
+        setTimeout(connectSSE, 3000);
+    };
+    evtSource.onmessage = (e) => {
+        appendLog([e.data]);
+    };
+    return evtSource;
+}
+
+function updateLogStatus() {
+    const dot = document.getElementById('log-status-dot');
+    const text = document.getElementById('log-status-text');
+    if (!dot || !text) return;
+    if (sseConnected) {
+        dot.className = 'status-dot running';
+        text.textContent = '实时连接中';
+    } else {
+        dot.className = 'status-dot stopped';
+        text.textContent = '连接断开';
+    }
+}
+
+// ---- Colorize log lines ----
+function colorize(line) {
+    if (line.includes('成功') || line.includes('完成') || line.includes('已完成')) return 'log-success';
+    if (line.includes('失败') || line.includes('错误') || line.includes('超时') || line.includes('过期')) return 'log-error';
+    if (line.includes('警告') || line.includes('跳过') || line.includes('已满')) return 'log-warn';
+    if (line.includes('尝试') || line.includes('检测') || line.includes('会话') || line.includes('弹窗')) return 'log-info';
+    if (line.includes('---') || line.includes('traceback')) return 'log-dim';
+    return '';
+}
+
+// ---- Log rendering ----
+function appendLog(lines) {
+    const container = document.getElementById('log-content');
+    for (const raw of lines) {
+        if (!raw.trim()) continue;
+        logLines.push(raw);
+        if (logLines.length > MAX_LOG_LINES) logLines.shift();
+
+        const div = document.createElement('div');
+        const cls = colorize(raw);
+        div.className = cls;
+        div.textContent = raw;
+        container.appendChild(div);
+    }
+    // Trim DOM
+    while (container.children.length > MAX_LOG_LINES) {
+        container.removeChild(container.firstChild);
+    }
+    const scroller = document.getElementById('log-container');
+    scroller.scrollTop = scroller.scrollHeight;
+}
+
+function clearLog() {
+    logLines = [];
+    document.getElementById('log-content').innerHTML = '<div class="log-dim">日志已清空</div>';
+}
+
+// ---- API calls ----
+async function apiGet(path) {
+    const r = await fetch(path);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+}
+
+async function apiPost(path, body) {
+    const r = await fetch(path, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Token': DASHBOARD_TOKEN,
+        },
+        body: JSON.stringify(body || {}),
+    });
+    const data = await r.json();
+    if (!r.ok && !data.error) {
+        data.error = `HTTP ${r.status}`;
+    }
+    return data;
+}
+
+// ---- Start / Stop ----
+async function startScript() {
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    btnStart.disabled = true;
+    btnStart.textContent = '⏳ 启动中...';
+
+    const mode = document.getElementById('mode').value;
+    const dryRun = document.getElementById('dry-run').checked;
+    const minInterval = parseInt(document.getElementById('min-interval').value) || 60;
+    const maxInterval = parseInt(document.getElementById('max-interval').value) || 300;
+
+    try {
+        const result = await apiPost('/api/start', {
+            mode,
+            dry_run: dryRun,
+            min_interval: minInterval,
+            max_interval: maxInterval,
+        });
+
+        if (result.ok) {
+            appendLog(['[控制台] 脚本已启动 (PID: ' + result.pid + ')']);
+        } else {
+            appendLog(['[控制台] 启动失败: ' + (result.error || '未知错误')]);
+        }
+    } catch (e) {
+        appendLog(['[控制台] 启动请求失败: ' + e.message]);
+    } finally {
+        btnStart.disabled = false;
+        btnStart.textContent = '▶ 启动';
+        updateButtons();
+    }
+}
+
+async function stopScript() {
+    try {
+        const result = await apiPost('/api/stop');
+        if (result.ok) {
+            appendLog(['[控制台] ' + result.message]);
+        } else {
+            appendLog(['[控制台] 停止失败: ' + (result.error || '未知错误')]);
+        }
+    } catch (e) {
+        appendLog(['[控制台] 停止请求失败: ' + e.message]);
+    } finally {
+        updateButtons();
+    }
+}
+
+// ---- UI updates ----
+function updateButtons() {
+    apiGet('/api/process').then(data => {
+        const btnStart = document.getElementById('btn-start');
+        const btnStop = document.getElementById('btn-stop');
+        const dot = document.getElementById('process-dot');
+        const text = document.getElementById('process-text');
+        const info = document.getElementById('process-info');
+
+        if (data.running) {
+            btnStart.disabled = true;
+            btnStop.disabled = false;
+            dot.className = 'status-dot running';
+            text.textContent = '运行中';
+            info.classList.remove('hidden');
+            document.getElementById('process-pid').textContent = `PID: ${data.pid}`;
+        } else {
+            btnStart.disabled = false;
+            btnStop.disabled = true;
+            dot.className = 'status-dot stopped';
+            text.textContent = '已停止';
+            info.classList.add('hidden');
+        }
+    });
+}
+
+function updateStatus() {
+    apiGet('/api/status').then(data => {
+        // Stats
+        document.getElementById('stat-refresh').textContent = data.refresh_count;
+
+        const successfulCount = data.courses.filter(c => c.status === 'success').length;
+        document.getElementById('stat-success').textContent = successfulCount;
+
+        const pendingCount = data.courses.filter(c => c.status === 'pending').length;
+        document.getElementById('stat-pending').textContent = pendingCount;
+
+        const lastRun = data.last_run_at ? data.last_run_at.split('T')[1]?.substring(0, 5) || data.last_run_at : '--';
+        document.getElementById('stat-last-run').textContent = lastRun;
+
+        // Login badge
+        const loginDot = document.getElementById('login-dot');
+        const loginText = document.getElementById('login-text');
+        const statusMap = {
+            'logged_in': { cls: 'running', text: '已登录' },
+            'captcha_error': { cls: 'error', text: '验证码错误' },
+            'login_failed': { cls: 'error', text: '登录失败' },
+            'expired': { cls: 'error', text: '登录过期' },
+            'unknown': { cls: 'stopped', text: '未登录' },
+        };
+        const s = statusMap[data.login_status] || statusMap['unknown'];
+        loginDot.className = 'status-dot ' + s.cls;
+        loginText.textContent = s.text;
+
+        // Course list
+        const listEl = document.getElementById('course-list');
+        if (data.courses.length === 0) {
+            listEl.innerHTML = '<div class="text-sm text-[#6c7086]">没有配置课程</div>';
+            return;
+        }
+        const statusStyles = {
+            success: 'bg-[#a6e3a1]/10 text-[#a6e3a1] border-[#a6e3a1]/20',
+            pending: 'bg-[#f9e2af]/10 text-[#f9e2af] border-[#f9e2af]/20',
+            unknown: 'bg-[#6c7086]/10 text-[#a6adc8] border-[#6c7086]/20',
+        };
+        const statusLabels = {
+            success: '✓ 已选成功',
+            pending: '⏳ 待选',
+            unknown: '? 未找到',
+        };
+        listEl.innerHTML = data.courses.map(c => {
+            const style = statusStyles[c.status] || statusStyles.unknown;
+            const label = statusLabels[c.status] || statusLabels.unknown;
+            return `
+                <div class="flex items-center justify-between p-3 rounded-lg bg-[#1e1e2e] border border-[#313244] gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm font-medium text-[#cdd6f4] truncate" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</div>
+                        <div class="text-xs text-[#6c7086] mt-0.5">关键词: ${c.keywords.join(', ')}</div>
+                    </div>
+                    <span class="ml-3 px-2.5 py-1 rounded-md text-xs font-medium border ${style} shrink-0">${label}</span>
+                </div>
+            `;
+        }).join('');
+    }).catch(() => {});
+}
+
+// ---- Config: Account ----
+async function loadAccountConfig() {
+    try {
+        const data = await apiGet('/api/config/account');
+        document.getElementById('cfg-user-id').value = data.user_id || '';
+        document.getElementById('cfg-url').value = data.url || '';
+        document.getElementById('cfg-password').value = '';
+        document.getElementById('cfg-password').placeholder = data.has_password ? '已设置（留空不修改）' : '未设置，请输入密码';
+        document.getElementById('account-save-status').textContent = '';
+    } catch (e) {
+        console.error('loadAccountConfig failed:', e);
+    }
+}
+
+function togglePasswordVisibility() {
+    const el = document.getElementById('cfg-password');
+    el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+async function saveAccount() {
+    const user_id = document.getElementById('cfg-user-id').value.trim();
+    const url = document.getElementById('cfg-url').value.trim();
+    const password = document.getElementById('cfg-password').value;
+    const status = document.getElementById('account-save-status');
+
+    if (!user_id) {
+        status.textContent = '学号不能为空';
+        status.className = 'text-sm text-[#f38ba8]';
+        return;
+    }
+    if (!url) {
+        status.textContent = 'URL 不能为空';
+        status.className = 'text-sm text-[#f38ba8]';
+        return;
+    }
+
+    status.textContent = '保存中...';
+    status.className = 'text-sm text-[#f9e2af]';
+
+    const result = await apiPost('/api/config/account', {
+        user_id,
+        url,
+        password,
+    });
+
+    if (result.ok) {
+        status.textContent = '已保存';
+        status.className = 'text-sm text-[#a6e3a1]';
+        document.getElementById('cfg-password').value = '';
+        if (!document.getElementById('cfg-password').placeholder.includes('已设置')) {
+            document.getElementById('cfg-password').placeholder = '已设置（留空不修改）';
+        }
+    } else {
+        status.textContent = '保存失败: ' + result.error;
+        status.className = 'text-sm text-[#f38ba8]';
+    }
+    setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+// ---- Config: Courses ----
+let editCourses = [];
+
+async function loadCoursesForEdit() {
+    try {
+        const data = await apiGet('/api/config/courses');
+        editCourses = JSON.parse(JSON.stringify(data.courses || []));
+        renderCoursesEdit();
+        // 显示文件最后修改时间
+        updateConfigSaveTime();
+    } catch (e) {
+        console.error('loadCoursesForEdit failed:', e);
+    }
+}
+
+function updateConfigSaveTime() {
+    const el = document.getElementById('config-save-time');
+    if (!el) return;
+    apiGet('/api/config/courses').then(data => {
+        const d = data.modified_at ? new Date(data.modified_at) : null;
+        el.textContent = d && !Number.isNaN(d.getTime())
+            ? `配置最后修改: ${d.toLocaleString('zh-CN')}`
+            : '';
+    }).catch(() => {
+        el.textContent = '';
+    });
+}
+
+function renderCoursesEdit() {
+    const container = document.getElementById('courses-edit-list');
+    if (editCourses.length === 0) {
+        container.innerHTML = '<div class="text-sm text-[#6c7086]">还没有配置课程，点击下方"添加课程"开始</div>';
+        return;
+    }
+    container.innerHTML = editCourses.map((c, i) => {
+        const enabledToggle = `
+            <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                <input type="checkbox" ${c.enabled !== false ? 'checked' : ''} onchange="toggleCourseEnabled(${i})" class="sr-only peer">
+                <div class="w-9 h-5 bg-[#313244] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#a6e3a1]"></div>
+            </label>
+        `;
+        return `
+            <div class="p-4 rounded-lg bg-[#1e1e2e] border border-[#313244] space-y-3">
+                <div class="flex items-start gap-3">
+                    <div class="flex-1 space-y-2">
+                        <div>
+                            <label class="block text-xs text-[#a6adc8] mb-1">课程名称</label>
+                            <input type="text" value="${escapeHtml(c.name || '')}" onchange="updateCourse(${i}, 'name', this.value)"
+                                   class="w-full bg-[#11111b] border border-[#313244] rounded-lg px-3 py-1.5 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-[#a6adc8] mb-1">关键词（用逗号分隔）</label>
+                            <input type="text" value="${escapeHtml((c.keywords || []).join(', '))}" onchange="updateCourse(${i}, 'keywords', this.value)"
+                                   class="w-full bg-[#11111b] border border-[#313244] rounded-lg px-3 py-1.5 text-sm text-[#cdd6f4] focus:outline-none focus:border-[#89b4fa]"
+                                   placeholder="例如: 高级编程语言">
+                        </div>
+                    </div>
+                    <div class="flex flex-col items-center gap-2 pt-5">
+                        ${enabledToggle}
+                        <button onclick="removeCourse(${i})" class="text-[#f38ba8] hover:text-[#eba0ac] text-xs transition-colors">
+                            删除
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function updateCourse(index, field, value) {
+    if (field === 'name') {
+        editCourses[index].name = value.trim();
+    } else if (field === 'keywords') {
+        editCourses[index].keywords = value.split(',').map(s => s.trim()).filter(Boolean);
+    }
+}
+
+function toggleCourseEnabled(index) {
+    editCourses[index].enabled = !editCourses[index].enabled;
+}
+
+function addCourse() {
+    editCourses.push({
+        name: "",
+        keywords: [""],
+        enabled: true,
+    });
+    renderCoursesEdit();
+    // Scroll to the new entry
+    const container = document.getElementById('courses-edit-list');
+    container.lastElementChild?.scrollIntoView({ behavior: 'smooth' });
+}
+
+function removeCourse(index) {
+    if (editCourses.length <= 1) {
+        alert('至少保留一门课程');
+        return;
+    }
+    if (!confirm(`确定删除"${editCourses[index].name || '未命名课程'}"？`)) return;
+    editCourses.splice(index, 1);
+    renderCoursesEdit();
+    // 删除后自动保存，避免用户刷新后课程"恢复"
+    saveCourses();
+}
+
+async function saveCourses() {
+    const status = document.getElementById('courses-save-status');
+    status.textContent = '保存中...';
+    status.className = 'text-sm text-[#f9e2af]';
+
+    const result = await apiPost('/api/config/courses', {
+        courses: editCourses,
+    });
+
+    if (result.ok) {
+        status.textContent = `已保存 (${result.count} 门课程)`;
+        status.className = 'text-sm text-[#a6e3a1]';
+        // 重新加载，确保 UI 和持久化数据一致
+        await loadCoursesForEdit();
+    } else {
+        status.textContent = '保存失败: ' + result.error;
+        status.className = 'text-sm text-[#f38ba8]';
+    }
+    setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+// ---- Tab switching ----
+function switchTab(tab) {
+    document.querySelectorAll('.tab-panel').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.tab-btn').forEach(el => {
+        el.classList.remove('bg-[#313244]', 'text-[#cdd6f4]');
+        el.classList.add('text-[#6c7086]');
+    });
+
+    document.getElementById('panel-' + tab).classList.remove('hidden');
+    const activeBtn = document.getElementById('tab-' + tab);
+    activeBtn.classList.add('bg-[#313244]', 'text-[#cdd6f4]');
+    activeBtn.classList.remove('text-[#6c7086]');
+
+    if (tab === 'account') {
+        loadAccountConfig();
+    } else if (tab === 'courses') {
+        loadCoursesForEdit();
+    }
+}
+document.addEventListener('DOMContentLoaded', () => {
+    loadAccountConfig();
+    const sse = connectSSE();
+    updateButtons();
+    updateStatus();
+    setInterval(updateButtons, 2000);
+    setInterval(updateStatus, 3000);
+});
+</script>
+</body>
+</html>

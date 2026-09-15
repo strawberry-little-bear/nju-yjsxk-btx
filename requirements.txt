@@ -1,3 +1,4 @@
 selenium>=4.15
 requests
 ddddocr
+Flask>=2.3

@@ -19,14 +19,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from selenium import webdriver
 from selenium.common import NoSuchElementException, TimeoutException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import WebDriverWait
+
+from browser_support import build_driver
 
 
 DEFAULT_CAPTCHA_DIR = Path("captcha_screenshots")
@@ -50,27 +49,6 @@ LOGIN_FAILURE_MARKERS = (
     "账户已锁定",
     "账户被锁",
 )
-
-
-def build_driver():
-    options = Options()
-    profile_dir = Path.cwd() / f".chrome-profile-{datetime.now():%Y%m%d-%H%M%S-%f}"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    options.add_argument(f"--user-data-dir={profile_dir}")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-first-run")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-popup-blocking")
-    cached_driver = (
-        Path.home()
-        / ".wdm/drivers/chromedriver/win64/152.0.7977.82/chromedriver-win64/chromedriver.exe"
-    )
-    if cached_driver.exists():
-        driver = webdriver.Chrome(service=Service(str(cached_driver)), options=options)
-    else:
-        driver = webdriver.Chrome(options=options)
-    driver.set_window_size(1200, 900)
-    return driver
 
 
 def print_timestamp(message: str) -> None:

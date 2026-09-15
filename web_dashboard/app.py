@@ -149,49 +149,64 @@ def start_process(args: list[str]) -> dict:
             return {"ok": False, "error": str(exc)}
 
 
+def _terminate_process_tree(pid: int, force: bool = False) -> None:
+    """Best-effort termination of a process and its children.
+
+    A process that has already exited counts as success: callers report a
+    friendly result instead of failing with ProcessLookupError.
+    """
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
+    except ProcessLookupError:
+        # 进程（组）已经结束：脚本自行退出，或刚好在检查之后退出。
+        pass
+
+
 def stop_process() -> dict:
     """Stop the running subprocess."""
-    global _process, _external_pid
+    global _process, _external_pid, _start_args
     with _process_lock:
         _recover_external_process()
         if _process is None and _external_pid is None:
             return {"ok": True, "message": "没有运行中的脚本"}
+        exited_on_its_own = False
         try:
             if _process is not None:
-                if os.name == "nt":
-                    subprocess.run(
-                        ["taskkill", "/PID", str(_process.pid), "/T", "/F"],
-                        check=False,
-                        capture_output=True,
-                    )
+                # 先确认子进程是否还活着，脚本自行退出时不应报错。
+                if _process.poll() is not None:
+                    exited_on_its_own = True
                 else:
-                    os.killpg(os.getpgid(_process.pid), signal.SIGTERM)
-                try:
-                    _process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    if os.name == "nt":
-                        subprocess.run(
-                            ["taskkill", "/PID", str(_process.pid), "/T", "/F"],
-                            check=False,
-                            capture_output=True,
-                        )
-                    else:
-                        os.killpg(os.getpgid(_process.pid), signal.SIGKILL)
-                    _process.wait()
+                    _terminate_process_tree(_process.pid)
+                    try:
+                        _process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        _terminate_process_tree(_process.pid, force=True)
+                        try:
+                            _process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            # 进程杀不掉时不要无限等待（会一直占着进程锁，
+                            # 让整个控制台失去响应），保留状态供用户重试。
+                            return {
+                                "ok": False,
+                                "error": f"无法结束脚本进程（PID {_process.pid}），请手动结束该进程后重试",
+                            }
             elif _external_pid is not None:
-                if os.name == "nt":
-                    subprocess.run(
-                        ["taskkill", "/PID", str(_external_pid), "/T", "/F"],
-                        check=False,
-                        capture_output=True,
-                    )
-                else:
-                    os.killpg(os.getpgid(_external_pid), signal.SIGTERM)
+                _terminate_process_tree(_external_pid)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         _process = None
         _external_pid = None
+        _start_args = []
         _clear_process_marker()
+        if exited_on_its_own:
+            return {"ok": True, "message": "脚本已自行结束"}
         return {"ok": True, "message": "已停止"}
 
 

@@ -12,10 +12,12 @@ from selenium.common import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
+    WebDriverException,
 )
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import WebDriverWait
+from urllib3.exceptions import HTTPError
 
 from browser_support import build_driver
 
@@ -145,6 +147,21 @@ def session_expired(driver):
         or url_is_login
         or any(marker in haystack for marker in LOGIN_EXPIRED_MARKERS)
     )
+
+
+def session_dead(driver):
+    """判断浏览器会话本身是否已不可用（浏览器被关闭、崩溃或驱动失联）。
+
+    与 session_expired 的区别：那里表示“浏览器还在，但登录失效”，可在原浏览器
+    里重新登录恢复；这里表示“浏览器已经没了”，必须重建 driver 才能继续。
+    """
+    try:
+        _ = driver.current_url
+    except (WebDriverException, HTTPError, OSError):
+        # WebDriverException：浏览器退出/窗口关闭（含 InvalidSessionIdException）；
+        # HTTPError：chromedriver 进程本身已退出，连接被拒。
+        return True
+    return False
 
 
 def handle_possible_alert(driver):
@@ -688,10 +705,19 @@ def main():
             except Exception as error:
                 log(f"[异常] 监控循环出现未处理异常：{error!r}")
                 log("[异常] traceback: " + traceback.format_exc().replace("\n", " | "))
-                alert_text = handle_possible_alert(driver)
+                browser_dead = session_dead(driver)
+                if browser_dead:
+                    # 浏览器被关闭或崩溃时原 driver 无法恢复，先重建再走登录恢复流程。
+                    log("[会话] 浏览器已关闭或崩溃，重建浏览器实例。")
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = build_driver()
+                alert_text = "" if browser_dead else handle_possible_alert(driver)
                 if alert_text:
                     log(f"[异常] 捕获到 JS 弹窗内容：{alert_text[:200]}")
-                expired = session_expired(driver) or any(
+                expired = browser_dead or session_expired(driver) or any(
                     marker in alert_text for marker in LOGIN_EXPIRED_MARKERS
                 )
                 if not expired:
@@ -754,7 +780,11 @@ def main():
         raise SystemExit(1) from error
     finally:
         log("程序结束。日志已保存。按回车关闭浏览器...")
-        input()
+        try:
+            input()
+        except (EOFError, OSError):
+            # 由控制台等以空 stdin 启动时读不到回车，直接关闭浏览器退出。
+            pass
         driver.quit()
         close_logging()
 
